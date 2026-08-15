@@ -9,16 +9,17 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/kivy/buildozer:latest
+      options: --user root
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build APK with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        id: buildozer
-        with:
-          command: buildozer android debug
-          workdir: mobile
+      - name: Build APK
+        run: |
+          cd mobile
+          buildozer android debug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
