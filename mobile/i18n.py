@@ -162,6 +162,30 @@ STRINGS = {
                       "ja": "相手が再戦を希望。承諾するには「もう一度」をクリック。"},
     "connection_lost": {"zh": "连接已断开。", "en": "Connection lost.", "ja": "接続が切れました。"},
 
+    # ---- 房间号联机 / 中继 ----
+    "mode_direct": {"zh": "直连（局域网）", "en": "Direct (LAN)", "ja": "直接（LAN）"},
+    "mode_relay": {"zh": "房间号（服务器）", "en": "Room code (Server)", "ja": "ルームコード（サーバー）"},
+    "relay_server": {"zh": "中继服务器 地址:端口", "en": "Relay server host:port", "ja": "中継サーバー ホスト:ポート"},
+    "relay_addr_hint": {"zh": "例：127.0.0.1:4000", "en": "e.g. 127.0.0.1:4000", "ja": "例：127.0.0.1:4000"},
+    "room_code_label": {"zh": "房间号", "en": "Room code", "ja": "ルームコード"},
+    "your_room_code": {"zh": "你的房间号", "en": "Your room code", "ja": "あなたのルームコード"},
+    "btn_create_room": {"zh": "创建房间", "en": "Create Room", "ja": "ルーム作成"},
+    "btn_join_room": {"zh": "加入房间", "en": "Join Room", "ja": "ルームに参加"},
+    "waiting_relay_client": {"zh": "已创建房间，把房间号告诉对方，等待加入…",
+                             "en": "Room created. Share the code and wait…",
+                             "ja": "ルーム作成済み。コードを共有して待機…"},
+    "relay_error": {"zh": "连接中继服务器失败，请检查地址/端口。", "en": "Failed to connect to relay server.",
+                    "ja": "中継サーバーへの接続に失敗しました。"},
+    "relay_join_error": {"zh": "加入房间失败，请检查房间号是否正确。", "en": "Failed to join room; check the code.",
+                         "ja": "ルーム参加に失敗しました。コードを確認してください。"},
+
+    # ---- 终局复盘 ----
+    "my_planes_label": {"zh": "我方飞机（复盘）", "en": "My planes (review)", "ja": "自分の機体（復習）"},
+    "enemy_planes_label": {"zh": "对方飞机（复盘）", "en": "Opponent's planes (review)", "ja": "相手の機体（復習）"},
+
+    # ---- 退出提示 ----
+    "opp_left": {"zh": "对方已退出，无法再来一局。", "en": "Opponent has left.", "ja": "相手が退出しました。"},
+
     # ---- 帮助 ----
     "help_title": {"zh": "游戏说明", "en": "Help / Rules", "ja": "遊び方・ルール"},
     "help_body": {

@@ -12,8 +12,8 @@ package.domain = org
 # (str) 源码目录（相对本 spec 文件）
 source.dir = .
 
-# (list) 要包含的源码扩展名
-source.include_exts = py
+# (list) 要包含的源码扩展名（含字体与音效）
+source.include_exts = py,ttf,otf,wav
 
 # (str) 应用版本
 version = 1.0.0
@@ -48,8 +48,8 @@ android.ndk_api = 21
 # (bool) 允许在手机上安装 debug 包
 android.allow_backup = True
 
-# (str) 图标（可选）
-# icon.filename = %(source.dir)s/icon.png
+# (str) 图标
+icon.filename = %(source.dir)s/app_icon.png
 
 [buildozer]
 

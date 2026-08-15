@@ -17,6 +17,7 @@ from tkinter import ttk, messagebox
 
 import game_core as gc
 import network as net
+import sound
 from ai import AIOpponent
 from i18n import Translator, LANGUAGE_NAMES, LANGUAGES
 
@@ -234,6 +235,11 @@ class GameApp:
         self.my_index = None
         self.phase = "menu"
         self.user_closing = False
+        self.host_mode = "direct"
+        self.join_mode = "direct"
+        self.room_code = ""
+        self.opp_disconnected = False
+        self.waiting_relay = False
 
         # 参数
         self.param_w = tk.StringVar(value="10")
@@ -241,6 +247,7 @@ class GameApp:
         self.param_n = tk.StringVar(value="3")
         self.host_port_var = tk.StringVar(value=str(net.DEFAULT_PORT))
         self.host_port = net.DEFAULT_PORT
+        self.relay_addr_var = tk.StringVar(value="127.0.0.1:4000")
 
         # 对局状态
         self.w = 10
@@ -254,6 +261,7 @@ class GameApp:
         self.my_shot_history = set()
         self.enemy_shots_on_me = {}   # (x,y) -> term（我方棋盘）
         self.enemy_shot_history = set()
+        self.revealed_enemy_planes = []
         self.my_turn = False
         self.awaiting_result = False
         self.i_ready = False
@@ -492,25 +500,50 @@ class GameApp:
         self.phase = "host_setup"
         box = self._centered_box()
         tk.Label(box, text=self.tr.t("host_setup_title"), bg=PANEL, font=("", 16, "bold"),
-                 fg="#1f3a52").pack(pady=(0, 10))
-        ip = net.get_primary_ip() or self.tr.t("host_ip_unknown")
-        tk.Label(box, text=self.tr.t("host_your_ip"), bg=PANEL, font=("", 11)).pack()
-        tk.Label(box, text=ip, bg=PANEL, fg="#1565c0", font=("Consolas", 13, "bold")).pack(pady=(0, 8))
-        row = tk.Frame(box, bg=PANEL)
-        row.pack(pady=4)
-        tk.Label(row, text=self.tr.t("host_port"), bg=PANEL, width=14, anchor="e").grid(row=0, column=0, padx=4)
-        port_entry = tk.Entry(row, textvariable=self.host_port_var, width=10,
-                              justify="center", font=("Consolas", 13))
-        port_entry.grid(row=0, column=1)
-        tk.Label(box, text=self.tr.t("host_port_hint"), bg=PANEL, fg="#54718a",
-                 font=("", 9), wraplength=400, justify="left").pack(pady=(8, 0))
+                 fg="#1f3a52").pack(pady=(0, 8))
+        self.host_mode_var = tk.StringVar(value=self.host_mode)
+        mode_row = tk.Frame(box, bg=PANEL)
+        mode_row.pack(pady=2)
+        for value, key in (("direct", "mode_direct"), ("relay", "mode_relay")):
+            tk.Radiobutton(mode_row, text=self.tr.t(key), variable=self.host_mode_var, value=value,
+                           bg=PANEL, command=self._on_host_mode_change, font=("", 10)).pack(side="left", padx=8)
+
+        if self.host_mode == "relay":
+            rrow = tk.Frame(box, bg=PANEL)
+            rrow.pack(pady=6)
+            tk.Label(rrow, text=self.tr.t("relay_server"), bg=PANEL, width=18, anchor="e").grid(row=0, column=0, padx=4)
+            tk.Entry(rrow, textvariable=self.relay_addr_var, width=20, font=("Consolas", 11)).grid(row=0, column=1)
+            tk.Label(box, text=self.tr.t("relay_addr_hint"), bg=PANEL, fg="#54718a",
+                     font=("", 9)).pack(pady=(2, 0))
+        else:
+            ip = net.get_primary_ip() or self.tr.t("host_ip_unknown")
+            tk.Label(box, text=self.tr.t("host_your_ip"), bg=PANEL, font=("", 11)).pack()
+            tk.Label(box, text=ip, bg=PANEL, fg="#1565c0", font=("Consolas", 13, "bold")).pack(pady=(0, 4))
+            row = tk.Frame(box, bg=PANEL)
+            row.pack(pady=2)
+            tk.Label(row, text=self.tr.t("host_port"), bg=PANEL, width=14, anchor="e").grid(row=0, column=0, padx=4)
+            tk.Entry(row, textvariable=self.host_port_var, width=10, justify="center",
+                     font=("Consolas", 13)).grid(row=0, column=1)
+            tk.Label(box, text=self.tr.t("host_port_hint"), bg=PANEL, fg="#54718a",
+                     font=("", 9), wraplength=400, justify="left").pack(pady=(6, 0))
+
+        self.host_status_label = tk.Label(box, text="", bg=PANEL, fg="#c62828", font=("", 10),
+                                          wraplength=380, justify="left")
+        self.host_status_label.pack(pady=(6, 0))
         btns = tk.Frame(box, bg=PANEL)
-        btns.pack(pady=16)
-        self._button(btns, self.tr.t("btn_start_listen"), self.start_hosting,
-                     accent="#2e7d32").pack(side="left", padx=6)
-        self._button(btns, self.tr.t("btn_back"), self.build_menu).pack(side="left", padx=6)
+        btns.pack(pady=12)
+        self._button(btns, self.tr.t("btn_start_listen"), self.start_hosting, accent="#2e7d32").pack(side="left", padx=6)
+        self._button(btns, self.tr.t("btn_back"), self._cancel_host).pack(side="left", padx=6)
+
+    def _on_host_mode_change(self):
+        self.host_mode = self.host_mode_var.get()
+        self.build_host_setup_page()
 
     def start_hosting(self):
+        sound.click()
+        if self.host_mode == "relay":
+            self._start_relay_host()
+            return
         try:
             port = int(self.host_port_var.get().strip())
             if not (1 <= port <= 65535):
@@ -527,6 +560,47 @@ class GameApp:
         self.phase = "host_wait"
         self.build_host_page()
         threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    def _start_relay_host(self):
+        addr = self.relay_addr_var.get().strip()
+        host, port = self._parse_relay_addr(addr)
+        self.host_status_label.configure(text=self.tr.t("connecting"), fg="#54718a")
+        threading.Thread(target=self._relay_host_loop, args=(host, port), daemon=True).start()
+
+    def _relay_host_loop(self, host, port):
+        try:
+            peer, code = net.relay_host(host, port)
+        except OSError:
+            self.root.after(0, self._relay_host_error)
+            return
+        self.root.after(0, self._on_relay_host, peer, code)
+
+    def _relay_host_error(self):
+        self.host_status_label.configure(text=self.tr.t("relay_error"), fg="#c62828")
+
+    def _on_relay_host(self, peer, code):
+        if self.phase != "host_setup":
+            peer.close()
+            return
+        self.peer = peer
+        self.room_code = code
+        self.waiting_relay = True
+        self.host_status_label.configure(
+            text=self.tr.t("your_room_code") + "  " + code + "\n" + self.tr.t("waiting_relay_client"),
+            fg="#2e7d32")
+
+    @staticmethod
+    def _parse_relay_addr(addr):
+        addr = addr.strip()
+        if ":" in addr:
+            host, port = addr.rsplit(":", 1)
+            try:
+                port = int(port)
+            except ValueError:
+                port = 4000
+        else:
+            host, port = addr, 4000
+        return host, port
 
     def build_host_page(self):
         self._clear_page()
@@ -552,25 +626,76 @@ class GameApp:
         self.phase = "join"
         box = self._centered_box()
         tk.Label(box, text=self.tr.t("join_title"), bg=PANEL, font=("", 16, "bold"),
-                 fg="#1f3a52").pack(pady=(0, 12))
-        row = tk.Frame(box, bg=PANEL)
-        row.pack(pady=4)
-        tk.Label(row, text=self.tr.t("join_ip"), bg=PANEL, width=20, anchor="e").grid(row=0, column=0, padx=4)
-        ip_entry = tk.Entry(row, width=26, font=("Consolas", 12))
-        ip_entry.grid(row=0, column=1)
-        ip_entry.insert(0, "127.0.0.1")
-        row2 = tk.Frame(box, bg=PANEL)
-        row2.pack(pady=4)
-        tk.Label(row2, text=self.tr.t("join_port"), bg=PANEL, width=14, anchor="e").grid(row=0, column=0, padx=4)
-        port_entry = tk.Entry(row2, width=22, font=("Consolas", 12))
-        port_entry.grid(row=0, column=1)
-        port_entry.insert(0, str(net.DEFAULT_PORT))
+                 fg="#1f3a52").pack(pady=(0, 8))
+        self.join_mode_var = tk.StringVar(value=self.join_mode)
+        mode_row = tk.Frame(box, bg=PANEL)
+        mode_row.pack(pady=2)
+        for value, key in (("direct", "mode_direct"), ("relay", "mode_relay")):
+            tk.Radiobutton(mode_row, text=self.tr.t(key), variable=self.join_mode_var, value=value,
+                           bg=PANEL, command=self._on_join_mode_change, font=("", 10)).pack(side="left", padx=8)
 
+        if self.join_mode == "relay":
+            rr1 = tk.Frame(box, bg=PANEL)
+            rr1.pack(pady=4)
+            tk.Label(rr1, text=self.tr.t("relay_server"), bg=PANEL, width=18, anchor="e").grid(row=0, column=0, padx=4)
+            relay_entry = tk.Entry(rr1, textvariable=self.relay_addr_var, width=20, font=("Consolas", 11))
+            relay_entry.grid(row=0, column=1)
+            rr2 = tk.Frame(box, bg=PANEL)
+            rr2.pack(pady=4)
+            tk.Label(rr2, text=self.tr.t("room_code_label"), bg=PANEL, width=14, anchor="e").grid(row=0, column=0, padx=4)
+            code_entry = tk.Entry(rr2, width=12, justify="center", font=("Consolas", 16))
+            code_entry.grid(row=0, column=1)
+            self.join_code_entry = code_entry
+        else:
+            row = tk.Frame(box, bg=PANEL)
+            row.pack(pady=4)
+            tk.Label(row, text=self.tr.t("join_ip"), bg=PANEL, width=20, anchor="e").grid(row=0, column=0, padx=4)
+            ip_entry = tk.Entry(row, width=26, font=("Consolas", 12))
+            ip_entry.grid(row=0, column=1)
+            ip_entry.insert(0, "127.0.0.1")
+            row2 = tk.Frame(box, bg=PANEL)
+            row2.pack(pady=4)
+            tk.Label(row2, text=self.tr.t("join_port"), bg=PANEL, width=14, anchor="e").grid(row=0, column=0, padx=4)
+            port_entry = tk.Entry(row2, width=22, font=("Consolas", 12))
+            port_entry.grid(row=0, column=1)
+            port_entry.insert(0, str(net.DEFAULT_PORT))
+
+        self.join_status_label = tk.Label(box, text="", bg=PANEL, fg="#c62828", font=("", 10))
+        self.join_status_label.pack(pady=(6, 0))
         btns = tk.Frame(box, bg=PANEL)
-        btns.pack(pady=16)
-        self._button(btns, self.tr.t("btn_connect"),
-                     lambda: self._do_connect(ip_entry, port_entry), accent="#1565c0").pack(side="left", padx=6)
+        btns.pack(pady=12)
+        if self.join_mode == "relay":
+            self._button(btns, self.tr.t("btn_join_room"), self._start_relay_join_from_ui,
+                         accent="#1565c0").pack(side="left", padx=6)
+        else:
+            self._button(btns, self.tr.t("btn_connect"),
+                         lambda: self._do_connect(ip_entry, port_entry), accent="#1565c0").pack(side="left", padx=6)
         self._button(btns, self.tr.t("btn_back"), self.build_menu).pack(side="left", padx=6)
+
+    def _on_join_mode_change(self):
+        self.join_mode = self.join_mode_var.get()
+        self.build_join_page()
+
+    def _start_relay_join_from_ui(self):
+        addr = self.relay_addr_var.get().strip()
+        code = self.join_code_entry.get().strip().upper()
+        if not code:
+            self.join_status_label.configure(text=self.tr.t("relay_join_error"))
+            return
+        host, port = self._parse_relay_addr(addr)
+        self.join_status_label.configure(text=self.tr.t("connecting"), fg="#54718a")
+        threading.Thread(target=self._relay_join_loop, args=(host, port, code), daemon=True).start()
+
+    def _relay_join_loop(self, host, port, code):
+        try:
+            peer = net.relay_join(host, port, code)
+        except OSError:
+            self.root.after(0, self._relay_join_error)
+            return
+        self.root.after(0, self._on_client_connected, peer)
+
+    def _relay_join_error(self):
+        self.join_status_label.configure(text=self.tr.t("relay_join_error"), fg="#c62828")
 
     def _do_connect(self, ip_entry, port_entry):
         host = ip_entry.get().strip()
@@ -1035,6 +1160,7 @@ class GameApp:
         self.board_enemy.set_cursor(x, y)
         self.awaiting_result = True
         self.peer.send({"type": "shot", "x": x, "y": y})
+        sound.shot()
         self._update_turn_status()
 
     def _update_turn_status(self):
@@ -1083,6 +1209,16 @@ class GameApp:
             self._on_result(msg)
         elif t == "rematch":
             self._on_rematch()
+        elif t == "reveal":
+            self.revealed_enemy_planes = [(tuple(p["head"]), p["ori"], p["alive"])
+                                          for p in msg.get("planes", [])]
+            if self.phase == "over":
+                self._render_over_boards()
+        elif t == "relay_ready":
+            if self.waiting_relay:
+                self.waiting_relay = False
+                self.phase = "params_host"
+                self.build_params_host_page()
 
     def _on_shot(self, msg):
         if self.phase != "battle":
@@ -1095,6 +1231,12 @@ class GameApp:
         self.peer.send({"type": "result", "x": x, "y": y, "term": term, "gameover": gameover})
         self._apply_my_overlay(x, y, term)
         self._log(self.tr.t("opponent"), x, y, term)
+        if term == "DESTROYED":
+            sound.destroy()
+        elif term == "DAMAGED":
+            sound.hit()
+        elif term in ("EMPTY", "WRECKAGE"):
+            sound.miss()
         if gameover:
             self._end_game(winner=self.my_index ^ 1)
         else:
@@ -1113,6 +1255,12 @@ class GameApp:
             self.my_shot_history.add((x, y))
         self._apply_enemy_shot(x, y, term)
         self._log(self.tr.t("me"), x, y, term)
+        if term == "DESTROYED":
+            sound.destroy()
+        elif term == "DAMAGED":
+            sound.hit()
+        elif term in ("EMPTY", "WRECKAGE"):
+            sound.miss()
         if gameover:
             self._end_game(winner=self.my_index)
         else:
@@ -1130,35 +1278,89 @@ class GameApp:
         self.game_over_winner = winner
         self.my_turn = False
         self.awaiting_result = False
+        self._send_reveal()
+        if winner == self.my_index:
+            sound.win()
+        else:
+            sound.lose()
         self.build_over_page()
+
+    def _send_reveal(self):
+        if self.peer is None or self.board is None:
+            return
+        planes = [{"head": list(p.head), "ori": p.orientation, "alive": p.alive}
+                  for p in self.board.planes]
+        self.peer.send({"type": "reveal", "planes": planes})
 
     def build_over_page(self):
         self._clear_page()
         self.phase = "over"
-        box = self._centered_box()
-        tk.Label(box, text=self.tr.t("game_over"), bg=PANEL, fg="#1f3a52",
-                 font=("", 18, "bold")).pack(pady=(0, 6))
+        cell = self._choose_cell()
+        header = tk.Frame(self.page, bg=BG)
+        header.pack(fill="x", padx=10, pady=(10, 4))
+        tk.Label(header, text=self.tr.t("game_over"), bg=BG, font=("", 18, "bold"),
+                 fg="#1f3a52").pack(side="left")
         if self.game_over_winner == self.my_index:
             text = self.tr.t("you_win")
             color = "#2e7d32"
         else:
             text = self.tr.t("you_lose")
             color = "#c62828"
-        tk.Label(box, text=text, bg=PANEL, fg=color, font=("", 16, "bold")).pack(pady=6)
-        self.over_hint_label = tk.Label(box, text="", bg=PANEL, fg="#54718a", font=("", 10))
-        self.over_hint_label.pack(pady=4)
+        tk.Label(header, text=text, bg=BG, font=("", 16, "bold"), fg=color).pack(side="left", padx=18)
+        self.over_hint_label = tk.Label(header, text="", bg=BG, fg="#c62828", font=("", 11))
+        self.over_hint_label.pack(side="right")
 
-        btns = tk.Frame(box, bg=PANEL)
-        btns.pack(pady=14)
+        body = tk.Frame(self.page, bg=BG)
+        body.pack(fill="both", expand=True, padx=10, pady=6)
+        mf = tk.Frame(body, bg=PANEL, bd=1, relief="solid")
+        mf.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        tk.Label(mf, text=self.tr.t("my_planes_label"), bg=PANEL, font=("", 10, "bold")).pack(pady=(4, 0))
+        self.board_my = BoardCanvas(mf, self.w, self.h, cell)
+        self.board_my.pack(padx=6, pady=6)
+        ef = tk.Frame(body, bg=PANEL, bd=1, relief="solid")
+        ef.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        tk.Label(ef, text=self.tr.t("enemy_planes_label"), bg=PANEL, font=("", 10, "bold")).pack(pady=(4, 0))
+        self.board_enemy = BoardCanvas(ef, self.w, self.h, cell)
+        self.board_enemy.pack(padx=6, pady=6)
+
+        btns = tk.Frame(self.page, bg=BG)
+        btns.pack(pady=(4, 10))
         self._button(btns, self.tr.t("btn_rematch"), self._request_rematch, accent="#2e7d32").pack(side="left", padx=6)
         self._button(btns, self.tr.t("btn_back_menu"), self._quit_to_menu, accent="#455a64").pack(side="left", padx=6)
 
+        self._render_over_boards()
         self._update_over_hint()
+
+    def _render_over_boards(self):
+        if self.board_my is None or self.board_enemy is None:
+            return
+        self.board_my.clear_all_marks()
+        self.board_enemy.clear_all_marks()
+        for x in range(1, self.w + 1):
+            for y in range(1, self.h + 1):
+                self.board_my.set_fill(x, y, C_SEA)
+                self.board_enemy.set_fill(x, y, C_SEA)
+        if self.board is not None:
+            for p in self.board.planes:
+                for (x, y) in p.coords:
+                    self.board_my.set_fill(x, y, C_MY_HEAD if (x, y) == p.head_coord else C_MY_PLANE)
+        for (x, y), term in self.enemy_shots_on_me.items():
+            self._apply_my_overlay(x, y, term)
+        for (head, ori, alive) in self.revealed_enemy_planes:
+            for (x, y) in gc.plane_absolute(head, ori):
+                if alive:
+                    self.board_enemy.set_fill(x, y, C_MY_HEAD if (x, y) == tuple(head) else C_MY_PLANE)
+                else:
+                    self.board_enemy.set_fill(x, y, C_WRECKED_HEAD if (x, y) == tuple(head) else C_WRECKED_MINE)
+        for (x, y), term in self.my_shots.items():
+            self._apply_enemy_shot(x, y, term)
 
     def _update_over_hint(self):
         if self.over_hint_label is None:
             return
-        if self.want_rematch:
+        if self.opp_disconnected:
+            self.over_hint_label.configure(text=self.tr.t("opp_left"))
+        elif self.want_rematch:
             self.over_hint_label.configure(text=self.tr.t("rematch_waiting"))
         elif self.opp_want_rematch:
             self.over_hint_label.configure(text=self.tr.t("rematch_asked"))
@@ -1166,6 +1368,10 @@ class GameApp:
             self.over_hint_label.configure(text="")
 
     def _request_rematch(self):
+        if self.peer is None or self.opp_disconnected:
+            self.opp_disconnected = True
+            self._update_over_hint()
+            return
         if self.want_rematch:
             return
         self.want_rematch = True
@@ -1200,11 +1406,13 @@ class GameApp:
         self.my_shot_history.clear()
         self.enemy_shots_on_me.clear()
         self.enemy_shot_history.clear()
+        self.revealed_enemy_planes = []
         self.my_turn = False
         self.awaiting_result = False
         self.game_over_winner = None
         self.want_rematch = False
         self.opp_want_rematch = False
+        self.opp_disconnected = False
         self.cursor = (1, 1)
         self.orientation = 0
 
@@ -1322,7 +1530,14 @@ class GameApp:
     def _on_disconnect(self):
         if self.user_closing:
             return
-        if self.phase in ("menu", "over"):
+        if self.phase == "menu":
+            return
+        if self.phase == "over":
+            self.opp_disconnected = True
+            if self.peer is not None:
+                self.peer.close()
+                self.peer = None
+            self._update_over_hint()
             return
         self._cleanup_connection()
         messagebox.showwarning(self.tr.t("app_title"), self.tr.t("connection_lost"))

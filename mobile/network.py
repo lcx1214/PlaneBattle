@@ -171,3 +171,63 @@ def connect_to_host(host, port, timeout=8.0):
     s = socket.create_connection((host, port), timeout=timeout)
     s.settimeout(None)
     return Peer(s, name=host)
+
+
+def _recv_line_raw(sock):
+    """逐字节读取一行（到 \\n），用于中继握手，避免缓冲读过头。"""
+    data = b""
+    while True:
+        try:
+            ch = sock.recv(1)
+        except OSError:
+            return data
+        if not ch:
+            return data
+        if ch == b"\n":
+            return data
+        data += ch
+
+
+def _send_line_raw(sock, obj):
+    sock.sendall((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def relay_host(relay_host, relay_port, timeout=20.0):
+    """房间号模式：主机连接中继服务器，立即返回 (Peer, 房间号)。"""
+    s = socket.create_connection((relay_host, relay_port), timeout=timeout)
+    s.settimeout(timeout)
+    try:
+        _send_line_raw(s, {"type": "host"})
+        line = _recv_line_raw(s)
+        msg = json.loads(line.decode("utf-8", "ignore")) if line else {}
+        code = msg.get("code")
+        if not code:
+            raise OSError("relay host failed")
+    except Exception:
+        try:
+            s.close()
+        except OSError:
+            pass
+        raise
+    s.settimeout(None)
+    return Peer(s, name="relay:" + code), code
+
+
+def relay_join(relay_host, relay_port, code, timeout=20.0):
+    """房间号模式：客户端连接中继服务器并加入指定房间，返回 Peer。"""
+    s = socket.create_connection((relay_host, relay_port), timeout=timeout)
+    s.settimeout(timeout)
+    try:
+        _send_line_raw(s, {"type": "join", "code": (code or "").strip().upper()})
+        line = _recv_line_raw(s)
+        msg = json.loads(line.decode("utf-8", "ignore")) if line else {}
+        if msg.get("type") != "relay_ready":
+            raise OSError("relay join failed: " + str(msg))
+    except Exception:
+        try:
+            s.close()
+        except OSError:
+            pass
+        raise
+    s.settimeout(None)
+    return Peer(s, name="relay:" + code)

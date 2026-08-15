@@ -2,22 +2,15 @@
 """
 mobile_app.py —— “飞机大战” Android/移动端（Kivy，触摸适配）。
 
-与桌面版（tkinter）完全共用：
-  - game_core.py  纯游戏逻辑
-  - network.py    局域网 TCP 联机（同一套 JSON 协议）
-  - ai.py         人机对手
-  - i18n.py       中/英/日三语
-
-因此移动端可与 Windows 的 exe 直接跨平台局域网对战。
-
+与桌面版共用 game_core / network / ai / i18n / sound。
 界面为触摸设计：点按棋盘放置/攻击，按钮较大，适配手机竖屏。
 """
 
+import os
 import threading
 
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.core.window import Window
 from kivy.graphics import Color, Line, Rectangle
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
@@ -29,13 +22,23 @@ from kivy.uix.screenmanager import Screen, ScreenManager
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
+# 注册 CJK 字体（解决中文/日文显示为 ☒ 的问题）
+from kivy.core.text import LabelBase
+_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansSC.ttf")
+if os.path.exists(_FONT_PATH):
+    LabelBase.register(name="Roboto", fn_regular=_FONT_PATH)
+
 import game_core as gc
 import network as net
+import sound
 from ai import AIOpponent
 from i18n import Translator, LANGUAGES, LANGUAGE_NAMES
 
+RELAY_DEFAULT = "127.0.0.1:4000"
+
+
 # ---------------------------------------------------------------------------
-# 颜色（RGB 0-1）
+# 颜色（RGB 0-1，高对比度）
 # ---------------------------------------------------------------------------
 def _rgb(h):
     h = h.lstrip("#")
@@ -53,18 +56,43 @@ C_MY_HEAD = _rgb("#e53935")
 C_WRECKED_MINE = _rgb("#9e9e9e")
 C_WRECKED_HEAD = _rgb("#7f1d1d")
 
-BG = _rgb("#eef4f9")
+BG = _rgb("#eef2f7")
 PANEL = _rgb("#ffffff")
 NAVY = _rgb("#1f3a52")
-INK = _rgb("#263238")
-GRAY = _rgb("#54718a")
+INK = _rgb("#1a2b3c")        # 深色正文，高对比
+GRAY = _rgb("#455a64")       # 次级文字（加深，提高对比）
+ACCENT = _rgb("#1565c0")
+GREEN = _rgb("#2e7d32")
+RED = _rgb("#c62828")
+ORANGE = _rgb("#ef6c00")
 
 
-# ---------------------------------------------------------------------------
-# 棋盘控件（触摸点按）
-# ---------------------------------------------------------------------------
+class Swatch(Widget):
+    """一个纯色小方块，用于图例。"""
+
+    def __init__(self, color, **kw):
+        super().__init__(**kw)
+        self._color = color
+        with self.canvas:
+            Color(*color)
+            self._rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._upd, size=self._upd)
+
+    def _upd(self, *a):
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+
+
+def legend_row(color, text):
+    row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(26), spacing=dp(8))
+    sw = Swatch(color, size_hint=(None, None), size=(dp(18), dp(18)), pos_hint={"center_y": 0.5})
+    row.add_widget(sw)
+    row.add_widget(Label(text=text, font_size=dp(13), color=INK, halign="left", valign="middle"))
+    return row
+
+
 class BoardWidget(Widget):
-    """可点按的网格棋盘。y=1 为最上一行（与桌面版一致）。"""
+    """可点按的网格棋盘（保持正方形格子，不拉伸）。y=1 为最上一行。"""
 
     def __init__(self, w, h, on_tap=None, **kw):
         super().__init__(**kw)
@@ -82,26 +110,34 @@ class BoardWidget(Widget):
             for x in range(self.cols):
                 self.cell_colors[y][x] = color
 
+    def _grid_geometry(self):
+        """返回 (cell, ox, oy)：正方形格子边长与居中偏移。"""
+        if self.width <= 0 or self.height <= 0:
+            return 0.0, 0.0, 0.0
+        cell = min(self.width / self.cols, self.height / self.rows)
+        ox = (self.width - cell * self.cols) / 2.0
+        oy = (self.height - cell * self.rows) / 2.0
+        return cell, ox, oy
+
     def refresh(self, *args):
         self.canvas.clear()
-        if self.width <= 0 or self.height <= 0:
+        cell, ox, oy = self._grid_geometry()
+        if cell <= 0:
             return
-        cw = self.width / self.cols
-        ch = self.height / self.rows
         with self.canvas:
             for gy in range(self.rows):
                 for gx in range(self.cols):
                     Color(*self.cell_colors[gy][gx])
-                    Rectangle(pos=(self.x + gx * cw,
-                                   self.y + self.height - (gy + 1) * ch),
-                              size=(cw, ch))
+                    Rectangle(pos=(self.x + ox + gx * cell,
+                                   self.y + oy + (self.rows - 1 - gy) * cell),
+                              size=(cell, cell))
             Color(*C_GRID)
             for i in range(self.cols + 1):
-                Line(points=[self.x + i * cw, self.y,
-                             self.x + i * cw, self.y + self.height], width=1)
+                Line(points=[self.x + ox + i * cell, self.y + oy,
+                             self.x + ox + i * cell, self.y + oy + self.rows * cell], width=1)
             for j in range(self.rows + 1):
-                Line(points=[self.x, self.y + j * ch,
-                             self.x + self.width, self.y + j * ch], width=1)
+                Line(points=[self.x + ox, self.y + oy + j * cell,
+                             self.x + ox + self.cols * cell, self.y + oy + j * cell], width=1)
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
@@ -112,19 +148,18 @@ class BoardWidget(Widget):
         return False
 
     def _pos_to_cell(self, pos):
-        if self.width <= 0 or self.height <= 0:
+        cell, ox, oy = self._grid_geometry()
+        if cell <= 0:
             return None
-        cw = self.width / self.cols
-        ch = self.height / self.rows
-        gx = int((pos[0] - self.x) / cw)
-        gy_bottom = int((pos[1] - self.y) / ch)
+        gx = int((pos[0] - self.x - ox) / cell)
+        gy_bottom = int((pos[1] - self.y - oy) / cell)
         if 0 <= gx < self.cols and 0 <= gy_bottom < self.rows:
             return gx + 1, self.rows - gy_bottom
         return None
 
 
 class ShapePreview(Widget):
-    """显示当前朝向的“士”字形飞机。"""
+    """显示当前朝向的“士”字形飞机（正方形格子）。"""
 
     def __init__(self, orientation=0, **kw):
         super().__init__(**kw)
@@ -146,32 +181,31 @@ class ShapePreview(Widget):
         maxy = max(p[1] for p in rel)
         cols = maxx - minx + 1
         rows = maxy - miny + 1
-        cw = self.width / cols
-        ch = self.height / rows
+        cell = min(self.width / cols, self.height / rows)
+        ox = (self.width - cell * cols) / 2.0
+        oy = (self.height - cell * rows) / 2.0
         with self.canvas:
             for (dx, dy) in rel:
                 Color(*(C_MY_HEAD if (dx, dy) == (0, 0) else C_MY_PLANE))
                 gx = dx - minx
                 gy = dy - miny
-                Rectangle(pos=(self.x + gx * cw,
-                               self.y + (rows - 1 - gy) * ch),
-                          size=(cw, ch))
+                Rectangle(pos=(self.x + ox + gx * cell,
+                               self.y + oy + (rows - 1 - gy) * cell),
+                          size=(cell, cell))
 
 
-def make_btn(text, on_press, accent=(0.18, 0.49, 0.20, 1), size_hint_y=None):
+def make_btn(text, on_press, accent=GREEN, height=dp(52)):
     b = Button(text=text, background_normal="", background_color=accent,
-               color=(1, 1, 1, 1), font_size=dp(16))
+               color=(1, 1, 1, 1), font_size=dp(17), bold=True)
     b.bind(on_press=lambda *a: on_press())
-    if size_hint_y is not None:
-        b.size_hint_y = size_hint_y
-        b.height = dp(48)
+    b.size_hint_y = None
+    b.height = height
     return b
 
 
 def make_label(text, size=14, color=INK, bold=False):
-    return Label(text=text, font_size=dp(size), color=color,
-                 bold=bold, halign="left", valign="middle",
-                 size_hint_y=None, height=dp(22), text_size=(None, None))
+    return Label(text=text, font_size=dp(size), color=color, bold=bold,
+                 halign="left", valign="middle", size_hint_y=None, height=dp(22))
 
 
 # ---------------------------------------------------------------------------
@@ -186,39 +220,38 @@ class BaseScreen(Screen):
 class MenuScreen(BaseScreen):
     def build(self):
         self.clear_widgets()
-        root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(10))
-        root.add_widget(Label(text=self.app.tr.t("app_title"), font_size=dp(24),
-                              bold=True, color=NAVY, size_hint_y=None, height=dp(60)))
-        root.add_widget(Label(text=self.app.tr.t("menu_subtitle"), font_size=dp(13),
+        root = BoxLayout(orientation="vertical", padding=dp(20), spacing=dp(12))
+        root.add_widget(Label(text=self.app.tr.t("app_title"), font_size=dp(26),
+                              bold=True, color=NAVY, size_hint_y=None, height=dp(64)))
+        root.add_widget(Label(text=self.app.tr.t("menu_subtitle"), font_size=dp(14),
                               color=GRAY, size_hint_y=None, height=dp(26)))
-        root.add_widget(make_btn(self.app.tr.t("btn_host"), self.app.goto_host, (0.18, 0.49, 0.20, 1)))
-        root.add_widget(make_btn(self.app.tr.t("btn_join"), self.app.goto_join, (0.08, 0.40, 0.75, 1)))
-        root.add_widget(make_btn(self.app.tr.t("btn_ai"), self.app.goto_ai, (0.0, 0.41, 0.36, 1)))
-        root.add_widget(make_btn(self.app.tr.t("btn_help"), self.app.goto_help, (0.42, 0.31, 0.64, 1)))
-        # 语言切换
-        lang_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(44))
+        root.add_widget(make_btn(self.app.tr.t("btn_host"), self.app.goto_host, GREEN))
+        root.add_widget(make_btn(self.app.tr.t("btn_join"), self.app.goto_join, ACCENT))
+        root.add_widget(make_btn(self.app.tr.t("btn_ai"), self.app.goto_ai, _rgb("#00695c")))
+        root.add_widget(make_btn(self.app.tr.t("btn_help"), self.app.goto_help, _rgb("#6a4fa3")))
+        lang_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(50))
         for lang in LANGUAGES:
             mark = "● " if lang == self.app.tr.lang else ""
             lang_row.add_widget(make_btn(mark + LANGUAGE_NAMES[lang],
-                                         lambda l=lang: self.app.set_language(l)))
+                                         lambda l=lang: self.app.set_language(l), _rgb("#455a64"), height=dp(46)))
         root.add_widget(lang_row)
-        root.add_widget(make_btn(self.app.tr.t("btn_quit"), self.app.do_quit, (0.69, 0.23, 0.23, 1)))
+        root.add_widget(make_btn(self.app.tr.t("btn_quit"), self.app.do_quit, RED))
         self.add_widget(root)
 
 
 class HelpScreen(BaseScreen):
     def build(self):
         self.clear_widgets()
-        root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
-        header = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(46))
-        header.add_widget(Label(text=self.app.tr.t("help_title"), bold=True, font_size=dp(18), color=NAVY))
-        header.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.goto_menu, (0.27, 0.36, 0.43, 1)))
+        root = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        header = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(48))
+        header.add_widget(Label(text=self.app.tr.t("help_title"), bold=True, font_size=dp(19), color=NAVY))
+        header.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.goto_menu, _rgb("#455a64"), height=dp(44)))
         root.add_widget(header)
         sv = ScrollView()
-        sv.add_widget(Label(text=self.app.tr.t("help_body"), font_size=dp(14), color=INK,
-                            halign="left", valign="top", size_hint_y=None,
-                            text_size=(None, None)))
-        sv.bind(width=lambda s, w: setattr(s.children[0], "text_size", (w - dp(20), None)))
+        lbl = Label(text=self.app.tr.t("help_body"), font_size=dp(15), color=INK,
+                    halign="left", valign="top", size_hint_y=None)
+        lbl.bind(width=lambda w, x: setattr(lbl, "text_size", (x - dp(24), None)))
+        sv.add_widget(lbl)
         root.add_widget(sv)
         self.add_widget(root)
 
@@ -228,23 +261,54 @@ class HostScreen(BaseScreen):
         self.clear_widgets()
         root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(10))
         root.add_widget(Label(text=self.app.tr.t("host_setup_title"), bold=True,
-                              font_size=dp(18), color=NAVY, size_hint_y=None, height=dp(40)))
+                              font_size=dp(19), color=NAVY, size_hint_y=None, height=dp(40)))
+        mode_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(50))
+        self.mode_buttons = {}
+        for mode, key in (("direct", "mode_direct"), ("relay", "mode_relay")):
+            b = make_btn(self.app.tr.t(key), lambda m=mode: self.app.set_host_mode(m), ACCENT, height=dp(46))
+            self.mode_buttons[mode] = b
+            mode_row.add_widget(b)
+        root.add_widget(mode_row)
+
+        self.direct_box = BoxLayout(orientation="vertical", spacing=dp(6))
         ip = net.get_primary_ip() or self.app.tr.t("host_ip_unknown")
-        root.add_widget(Label(text=self.app.tr.t("host_your_ip"), font_size=dp(14), color=GRAY,
-                              size_hint_y=None, height=dp(24)))
-        root.add_widget(Label(text=ip, font_size=dp(20), bold=True, color=(0.08, 0.40, 0.75, 1),
-                              size_hint_y=None, height=dp(32)))
-        row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
-        row.add_widget(Label(text=self.app.tr.t("host_port"), size_hint_x=0.3, color=INK))
+        self.direct_box.add_widget(Label(text=self.app.tr.t("host_your_ip"), font_size=dp(14), color=GRAY,
+                                         size_hint_y=None, height=dp(22)))
+        self.direct_box.add_widget(Label(text=ip, font_size=dp(20), bold=True, color=ACCENT,
+                                         size_hint_y=None, height=dp(30)))
+        prow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
+        prow.add_widget(Label(text=self.app.tr.t("host_port"), size_hint_x=0.35, color=INK))
         self.port_input = TextInput(text=str(self.app.host_port), multiline=False,
-                                    input_filter="int", size_hint_x=0.7, font_size=dp(16))
-        row.add_widget(self.port_input)
-        root.add_widget(row)
-        self.status = make_label("", size=13, color=GRAY)
+                                    input_filter="int", size_hint_x=0.65, font_size=dp(16))
+        prow.add_widget(self.port_input)
+        self.direct_box.add_widget(prow)
+        root.add_widget(self.direct_box)
+
+        self.relay_box = BoxLayout(orientation="vertical", spacing=dp(6))
+        rrow = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
+        rrow.add_widget(Label(text=self.app.tr.t("relay_server"), size_hint_x=0.4, color=INK, font_size=dp(14)))
+        self.relay_input = TextInput(text=RELAY_DEFAULT, multiline=False, size_hint_x=0.6, font_size=dp(16))
+        rrow.add_widget(self.relay_input)
+        self.relay_box.add_widget(rrow)
+        self.relay_box.add_widget(Label(text=self.app.tr.t("relay_addr_hint"), font_size=dp(12), color=GRAY,
+                                        size_hint_y=None, height=dp(20)))
+        root.add_widget(self.relay_box)
+
+        self.status = make_label("", size=14, color=RED)
         root.add_widget(self.status)
-        root.add_widget(make_btn(self.app.tr.t("btn_start_listen"), self.app.start_hosting))
-        root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host, (0.27, 0.36, 0.43, 1)))
+        root.add_widget(make_btn(self.app.tr.t("btn_start_listen"), self.app.start_hosting, GREEN))
+        root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host, _rgb("#455a64")))
         self.add_widget(root)
+        self.refresh()
+
+    def refresh(self):
+        relay = (self.app.host_mode == "relay")
+        for m, b in self.mode_buttons.items():
+            b.background_color = ACCENT if (m == "relay") == relay else _rgb("#9aa8b5")
+        self.direct_box.opacity = 0 if relay else 1
+        self.direct_box.disabled = relay
+        self.relay_box.opacity = 1 if relay else 0
+        self.relay_box.disabled = not relay
 
 
 class JoinScreen(BaseScreen):
@@ -252,40 +316,71 @@ class JoinScreen(BaseScreen):
         self.clear_widgets()
         root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(10))
         root.add_widget(Label(text=self.app.tr.t("join_title"), bold=True,
-                              font_size=dp(18), color=NAVY, size_hint_y=None, height=dp(40)))
+                              font_size=dp(19), color=NAVY, size_hint_y=None, height=dp(40)))
+        mode_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(50))
+        self.mode_buttons = {}
+        for mode, key in (("direct", "mode_direct"), ("relay", "mode_relay")):
+            b = make_btn(self.app.tr.t(key), lambda m=mode: self.app.set_join_mode(m), ACCENT, height=dp(46))
+            self.mode_buttons[mode] = b
+            mode_row.add_widget(b)
+        root.add_widget(mode_row)
+
+        self.direct_box = BoxLayout(orientation="vertical", spacing=dp(6))
         row1 = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
-        row1.add_widget(Label(text=self.app.tr.t("join_ip"), size_hint_x=0.35, color=INK))
+        row1.add_widget(Label(text=self.app.tr.t("join_ip"), size_hint_x=0.35, color=INK, font_size=dp(14)))
         self.addr_input = TextInput(text="127.0.0.1", multiline=False, size_hint_x=0.65, font_size=dp(16))
         row1.add_widget(self.addr_input)
-        root.add_widget(row1)
+        self.direct_box.add_widget(row1)
         row2 = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
         row2.add_widget(Label(text=self.app.tr.t("join_port"), size_hint_x=0.35, color=INK))
         self.port_input = TextInput(text=str(net.DEFAULT_PORT), multiline=False,
                                     input_filter="int", size_hint_x=0.65, font_size=dp(16))
         row2.add_widget(self.port_input)
-        root.add_widget(row2)
-        self.status = make_label("", size=13, color=GRAY)
+        self.direct_box.add_widget(row2)
+        root.add_widget(self.direct_box)
+
+        self.relay_box = BoxLayout(orientation="vertical", spacing=dp(6))
+        rr1 = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
+        rr1.add_widget(Label(text=self.app.tr.t("relay_server"), size_hint_x=0.4, color=INK, font_size=dp(14)))
+        self.relay_input = TextInput(text=RELAY_DEFAULT, multiline=False, size_hint_x=0.6, font_size=dp(16))
+        rr1.add_widget(self.relay_input)
+        self.relay_box.add_widget(rr1)
+        rr2 = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
+        rr2.add_widget(Label(text=self.app.tr.t("room_code_label"), size_hint_x=0.4, color=INK))
+        self.code_input = TextInput(text="", multiline=False, size_hint_x=0.6, font_size=dp(18))
+        rr2.add_widget(self.code_input)
+        self.relay_box.add_widget(rr2)
+        root.add_widget(self.relay_box)
+
+        self.status = make_label("", size=14, color=RED)
         root.add_widget(self.status)
-        root.add_widget(make_btn(self.app.tr.t("btn_connect"), self.app.start_join, (0.08, 0.40, 0.75, 1)))
-        root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host, (0.27, 0.36, 0.43, 1)))
+        root.add_widget(make_btn(self.app.tr.t("btn_join_room"), self.app.start_join, ACCENT))
+        root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host, _rgb("#455a64")))
         self.add_widget(root)
+        self.refresh()
+
+    def refresh(self):
+        relay = (self.app.join_mode == "relay")
+        for m, b in self.mode_buttons.items():
+            b.background_color = ACCENT if (m == "relay") == relay else _rgb("#9aa8b5")
+        self.direct_box.opacity = 0 if relay else 1
+        self.direct_box.disabled = relay
+        self.relay_box.opacity = 1 if relay else 0
+        self.relay_box.disabled = not relay
 
 
 class ParamsScreen(BaseScreen):
-    """主机设置参数 / 客户端确认参数 共用。"""
-
     def build(self):
         self.clear_widgets()
         root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(10))
         if self.app.phase == "params_wait":
-            root.add_widget(Label(text=self.app.tr.t("params_waiting"), font_size=dp(15),
-                                  color=INK, size_hint_y=None, height=dp(40)))
-            root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host,
-                                     (0.27, 0.36, 0.43, 1)))
+            root.add_widget(Label(text=self.app.tr.t("params_waiting"), font_size=dp(15), color=INK,
+                                  size_hint_y=None, height=dp(40)))
+            root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host, _rgb("#455a64")))
             self.add_widget(root)
             return
         root.add_widget(Label(text=self.app.tr.t("params_title"), bold=True,
-                              font_size=dp(18), color=NAVY, size_hint_y=None, height=dp(40)))
+                              font_size=dp(19), color=NAVY, size_hint_y=None, height=dp(40)))
         is_host = (self.app.my_index == 0)
         self.w_input = TextInput(text=str(self.app.w), multiline=False, input_filter="int", font_size=dp(16))
         self.h_input = TextInput(text=str(self.app.h), multiline=False, input_filter="int", font_size=dp(16))
@@ -295,20 +390,20 @@ class ParamsScreen(BaseScreen):
                            (self.app.tr.t("num_planes"), self.n_input)):
             row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(8))
             row.add_widget(Label(text=label, size_hint_x=0.55, color=INK))
-            row.add_widget(inp)
             inp.size_hint_x = 0.45
             inp.readonly = not is_host
+            row.add_widget(inp)
             root.add_widget(row)
-        self.err = make_label("", size=13, color=(0.78, 0.16, 0.16, 1))
+        self.err = make_label("", size=14, color=RED)
         root.add_widget(self.err)
         if is_host:
-            root.add_widget(make_btn(self.app.tr.t("btn_confirm_params"), self.app.send_params))
+            root.add_widget(make_btn(self.app.tr.t("btn_confirm_params"), self.app.send_params, GREEN))
         else:
-            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(48))
-            btn_row.add_widget(make_btn(self.app.tr.t("btn_accept"), self.app.accept_params, (0.18, 0.49, 0.20, 1)))
-            btn_row.add_widget(make_btn(self.app.tr.t("btn_reject"), self.app.reject_params, (0.69, 0.23, 0.23, 1)))
+            btn_row = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(50))
+            btn_row.add_widget(make_btn(self.app.tr.t("btn_accept"), self.app.accept_params, GREEN, height=dp(46)))
+            btn_row.add_widget(make_btn(self.app.tr.t("btn_reject"), self.app.reject_params, RED, height=dp(46)))
             root.add_widget(btn_row)
-        root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host, (0.27, 0.36, 0.43, 1)))
+        root.add_widget(make_btn(self.app.tr.t("btn_back"), self.app.cancel_host, _rgb("#455a64")))
         self.add_widget(root)
 
 
@@ -317,40 +412,34 @@ class DeployScreen(BaseScreen):
         self.clear_widgets()
         root = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(6))
         header = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(44))
-        header.add_widget(Label(text=self.app.tr.t("deploy_title"), bold=True,
-                                font_size=dp(16), color=NAVY))
-        self.count_label = Label(text="", font_size=dp(14), color=(0.18, 0.49, 0.20, 1))
+        header.add_widget(Label(text=self.app.tr.t("deploy_title"), bold=True, font_size=dp(16), color=NAVY))
+        self.count_label = Label(text="", font_size=dp(14), color=GREEN)
         header.add_widget(self.count_label)
         root.add_widget(header)
 
-        # 棋盘
         self.board = BoardWidget(self.app.w, self.app.h, on_tap=self.app.on_deploy_tap)
-        board_box = BoxLayout(orientation="vertical", size_hint_y=1.0)
-        board_box.add_widget(self.board)
-        root.add_widget(board_box)
+        root.add_widget(self.board)
 
-        # 朝向按钮
-        ori_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(46))
+        ori_row = BoxLayout(orientation="horizontal", spacing=dp(6), size_hint_y=None, height=dp(48))
         self.ori_buttons = {}
         for ori, key in ((0, "ori_up"), (90, "ori_right"), (180, "ori_down"), (270, "ori_left")):
-            b = make_btn(self.app.tr.t(key), lambda o=ori: self.app.set_orientation(o), (0.08, 0.40, 0.75, 1))
+            b = make_btn(self.app.tr.t(key), lambda o=ori: self.app.set_orientation(o), ACCENT, height=dp(44))
             self.ori_buttons[ori] = b
             ori_row.add_widget(b)
         root.add_widget(ori_row)
 
-        # 预览 + 动作
-        mid = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(70))
+        mid = BoxLayout(orientation="horizontal", spacing=dp(8), size_hint_y=None, height=dp(80))
         self.preview = ShapePreview(self.app.orientation, size_hint_x=0.5)
         mid.add_widget(self.preview)
         acts = GridLayout(cols=2, spacing=dp(6), size_hint_x=0.5)
-        acts.add_widget(make_btn(self.app.tr.t("btn_random"), self.app.do_random, (0.27, 0.36, 0.43, 1)))
-        acts.add_widget(make_btn(self.app.tr.t("btn_clear"), self.app.do_clear, (0.27, 0.36, 0.43, 1)))
-        acts.add_widget(make_btn(self.app.tr.t("btn_done"), self.app.do_done, (0.18, 0.49, 0.20, 1)))
-        acts.add_widget(make_btn(self.app.tr.t("btn_back_menu"), self.app.quit_to_menu, (0.27, 0.36, 0.43, 1)))
+        acts.add_widget(make_btn(self.app.tr.t("btn_random"), self.app.do_random, _rgb("#455a64"), height=dp(36)))
+        acts.add_widget(make_btn(self.app.tr.t("btn_clear"), self.app.do_clear, _rgb("#455a64"), height=dp(36)))
+        acts.add_widget(make_btn(self.app.tr.t("btn_done"), self.app.do_done, GREEN, height=dp(36)))
+        acts.add_widget(make_btn(self.app.tr.t("btn_back_menu"), self.app.quit_to_menu, _rgb("#455a64"), height=dp(36)))
         mid.add_widget(acts)
         root.add_widget(mid)
 
-        self.msg = make_label("", size=12, color=(0.78, 0.16, 0.16, 1))
+        self.msg = make_label("", size=13, color=RED)
         root.add_widget(self.msg)
         self.add_widget(root)
         self.refresh()
@@ -358,8 +447,7 @@ class DeployScreen(BaseScreen):
     def refresh(self):
         if self.app.board is None:
             return
-        self.count_label.text = self.app.tr.t("deploy_count",
-                                              placed=self.app.board.count(), total=self.app.n)
+        self.count_label.text = self.app.tr.t("deploy_count", placed=self.app.board.count(), total=self.app.n)
         self.preview.set_orientation(self.app.orientation)
         self.app.render_my_board(self.board)
         self.app.apply_deploy_ready_state()
@@ -369,20 +457,17 @@ class BattleScreen(BaseScreen):
     def build(self):
         self.clear_widgets()
         root = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(6))
-        self.status = Label(text="", bold=True, font_size=dp(15), color=(0.08, 0.40, 0.75, 1),
-                            size_hint_y=None, height=dp(30))
+        self.status = Label(text="", bold=True, font_size=dp(16), color=ACCENT, size_hint_y=None, height=dp(32))
         root.add_widget(self.status)
 
         boards = BoxLayout(orientation="horizontal", spacing=dp(8))
-        # 我方棋盘（较小）
-        left = BoxLayout(orientation="vertical", size_hint_x=0.42)
+        left = BoxLayout(orientation="vertical", size_hint_x=0.44)
         left.add_widget(Label(text=self.app.tr.t("my_board"), font_size=dp(12), color=GRAY,
                               size_hint_y=None, height=dp(20)))
         self.my_board = BoardWidget(self.app.w, self.app.h)
         left.add_widget(self.my_board)
         boards.add_widget(left)
-        # 敌方棋盘（主战场，较大）
-        right = BoxLayout(orientation="vertical", size_hint_x=0.58)
+        right = BoxLayout(orientation="vertical", size_hint_x=0.56)
         right.add_widget(Label(text=self.app.tr.t("enemy_board"), font_size=dp(12), color=GRAY,
                                size_hint_y=None, height=dp(20)))
         self.enemy_board = BoardWidget(self.app.w, self.app.h, on_tap=self.app.on_enemy_tap)
@@ -390,19 +475,19 @@ class BattleScreen(BaseScreen):
         boards.add_widget(right)
         root.add_widget(boards)
 
-        # 图例
-        legend = Label(text=self.app.legend_text(), font_size=dp(11), color=GRAY,
-                       halign="left", valign="top", size_hint_y=None, height=dp(80))
-        root.add_widget(legend)
+        leg = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(110), spacing=dp(1))
+        leg.add_widget(legend_row(C_SEA, self.app.tr.t("lg_unknown")))
+        leg.add_widget(legend_row(C_DAMAGED, self.app.tr.t("lg_damaged") + " / " + self.app.tr.t("lg_destroyed")))
+        leg.add_widget(legend_row(C_WRECKAGE, self.app.tr.t("lg_wreckage")))
+        leg.add_widget(legend_row(C_MY_PLANE, self.app.tr.t("lg_my_plane") + "（" + self.app.tr.t("legend_my_head") + "）"))
+        root.add_widget(leg)
 
-        # 日志
         self.log = Label(text="", font_size=dp(12), color=INK, halign="left", valign="top")
-        logsv = ScrollView(size_hint_y=0.9)
+        logsv = ScrollView(size_hint_y=1)
         logsv.add_widget(self.log)
         root.add_widget(logsv)
 
-        root.add_widget(make_btn(self.app.tr.t("btn_quit_battle"), self.app.quit_to_menu,
-                                 (0.69, 0.23, 0.23, 1)))
+        root.add_widget(make_btn(self.app.tr.t("btn_quit_battle"), self.app.quit_to_menu, RED, height=dp(46)))
         self.add_widget(root)
         self.refresh()
 
@@ -416,26 +501,45 @@ class BattleScreen(BaseScreen):
 class OverScreen(BaseScreen):
     def build(self):
         self.clear_widgets()
-        root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12))
-        root.add_widget(Label(text=self.app.tr.t("game_over"), bold=True,
-                              font_size=dp(22), color=NAVY, size_hint_y=None, height=dp(50)))
+        root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        root.add_widget(Label(text=self.app.tr.t("game_over"), bold=True, font_size=dp(22), color=NAVY,
+                              size_hint_y=None, height=dp(46)))
         if self.app.game_over_winner == self.app.my_index:
             text = self.app.tr.t("you_win")
-            color = (0.18, 0.49, 0.20, 1)
+            color = GREEN
         else:
             text = self.app.tr.t("you_lose")
-            color = (0.78, 0.16, 0.16, 1)
-        root.add_widget(Label(text=text, font_size=dp(20), bold=True, color=color,
-                              size_hint_y=None, height=dp(44)))
-        self.hint = Label(text="", font_size=dp(13), color=GRAY, size_hint_y=None, height=dp(30))
+            color = RED
+        root.add_widget(Label(text=text, font_size=dp(20), bold=True, color=color, size_hint_y=None, height=dp(42)))
+
+        boards = BoxLayout(orientation="horizontal", spacing=dp(8))
+        left = BoxLayout(orientation="vertical", size_hint_x=0.5)
+        left.add_widget(Label(text=self.app.tr.t("my_planes_label"), font_size=dp(12), color=GRAY,
+                              size_hint_y=None, height=dp(20)))
+        self.my_board = BoardWidget(self.app.w, self.app.h)
+        left.add_widget(self.my_board)
+        boards.add_widget(left)
+        right = BoxLayout(orientation="vertical", size_hint_x=0.5)
+        right.add_widget(Label(text=self.app.tr.t("enemy_planes_label"), font_size=dp(12), color=GRAY,
+                               size_hint_y=None, height=dp(20)))
+        self.enemy_board = BoardWidget(self.app.w, self.app.h)
+        right.add_widget(self.enemy_board)
+        boards.add_widget(right)
+        root.add_widget(boards)
+
+        self.hint = Label(text="", font_size=dp(13), color=RED, size_hint_y=None, height=dp(30))
         root.add_widget(self.hint)
-        root.add_widget(make_btn(self.app.tr.t("btn_rematch"), self.app.request_rematch, (0.18, 0.49, 0.20, 1)))
-        root.add_widget(make_btn(self.app.tr.t("btn_back_menu"), self.app.quit_to_menu, (0.27, 0.36, 0.43, 1)))
+        root.add_widget(make_btn(self.app.tr.t("btn_rematch"), self.app.request_rematch, GREEN, height=dp(48)))
+        root.add_widget(make_btn(self.app.tr.t("btn_back_menu"), self.app.quit_to_menu, _rgb("#455a64"), height=dp(46)))
         self.add_widget(root)
         self.refresh()
 
     def refresh(self):
-        if self.app.want_rematch:
+        self.app.render_my_board(self.my_board)
+        self.app.render_revealed_enemy_board(self.enemy_board)
+        if self.app.opp_disconnected:
+            self.hint.text = self.app.tr.t("opp_left")
+        elif self.app.want_rematch:
             self.hint.text = self.app.tr.t("rematch_waiting")
         elif self.app.opp_want_rematch:
             self.hint.text = self.app.tr.t("rematch_asked")
@@ -454,6 +558,10 @@ class PlaneBattleApp(App):
         self.my_index = None
         self.phase = "menu"
         self.user_closing = False
+        self.host_mode = "direct"
+        self.join_mode = "direct"
+        self.room_code = ""
+        self.opp_disconnected = False
 
         self.w = 10
         self.h = 10
@@ -466,6 +574,7 @@ class PlaneBattleApp(App):
         self.my_shot_history = set()
         self.enemy_shots_on_me = {}
         self.enemy_shot_history = set()
+        self.revealed_enemy_planes = []
         self.my_turn = False
         self.awaiting_result = False
         self.i_ready = False
@@ -524,10 +633,22 @@ class PlaneBattleApp(App):
 
     def set_language(self, lang):
         self.tr.set_lang(lang)
-        self.goto(self.sm.current)   # 重建当前页以刷新文字
+        self.goto(self.sm.current)
+
+    def set_host_mode(self, mode):
+        self.host_mode = mode
+        self.host_screen.refresh()
+
+    def set_join_mode(self, mode):
+        self.join_mode = mode
+        self.join_screen.refresh()
 
     # ---------------- 主机 ----------------
     def start_hosting(self):
+        sound.click()
+        if self.host_mode == "relay":
+            self._start_relay_host()
+            return
         try:
             port = int(self.host_screen.port_input.text.strip())
             if not (1 <= port <= 65535):
@@ -543,6 +664,33 @@ class PlaneBattleApp(App):
             return
         self.host_screen.status.text = self.tr.t("host_waiting")
         threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    def _start_relay_host(self):
+        addr = self.host_screen.relay_input.text.strip()
+        host, port = self._parse_relay_addr(addr)
+        self.host_screen.status.text = self.tr.t("connecting")
+        threading.Thread(target=self._relay_host_loop, args=(host, port), daemon=True).start()
+
+    def _relay_host_loop(self, host, port):
+        try:
+            peer, code = net.relay_host(host, port)
+        except OSError:
+            Clock.schedule_once(lambda dt: self._relay_host_error(), 0)
+            return
+        Clock.schedule_once(lambda dt: self._on_relay_host(peer, code), 0)
+
+    def _relay_host_error(self):
+        self.host_screen.status.text = self.tr.t("relay_error")
+
+    def _on_relay_host(self, peer, code):
+        if self.phase != "host":
+            peer.close()
+            return
+        self.peer = peer
+        self.room_code = code
+        self.host_screen.status.text = self.tr.t("your_room_code") + "  " + code + "\n" + self.tr.t("waiting_relay_client")
+        self.phase = "params"
+        Clock.schedule_once(lambda dt: self.goto("params"), 1.2)
 
     def _accept_loop(self):
         try:
@@ -576,6 +724,10 @@ class PlaneBattleApp(App):
 
     # ---------------- 客户端 ----------------
     def start_join(self):
+        sound.click()
+        if self.join_mode == "relay":
+            self._start_relay_join()
+            return
         host = self.join_screen.addr_input.text.strip()
         try:
             port = int(self.join_screen.port_input.text.strip())
@@ -587,6 +739,27 @@ class PlaneBattleApp(App):
             return
         self.join_screen.status.text = self.tr.t("connecting")
         threading.Thread(target=self._connect_loop, args=(host, port), daemon=True).start()
+
+    def _start_relay_join(self):
+        addr = self.join_screen.relay_input.text.strip()
+        code = self.join_screen.code_input.text.strip().upper()
+        if not code:
+            self.join_screen.status.text = self.tr.t("relay_join_error")
+            return
+        host, port = self._parse_relay_addr(addr)
+        self.join_screen.status.text = self.tr.t("connecting")
+        threading.Thread(target=self._relay_join_loop, args=(host, port, code), daemon=True).start()
+
+    def _relay_join_loop(self, host, port, code):
+        try:
+            peer = net.relay_join(host, port, code)
+        except OSError:
+            Clock.schedule_once(lambda dt: self._relay_join_error(), 0)
+            return
+        Clock.schedule_once(lambda dt: self._on_client_connected(peer), 0)
+
+    def _relay_join_error(self):
+        self.join_screen.status.text = self.tr.t("relay_join_error")
 
     def _connect_loop(self, host, port):
         try:
@@ -606,7 +779,20 @@ class PlaneBattleApp(App):
             return
         self.peer = peer
         self.phase = "params_wait"
-        self.goto("params")   # 客户端进入“等待主机参数”状态
+        self.goto("params")
+
+    @staticmethod
+    def _parse_relay_addr(addr):
+        addr = addr.strip()
+        if ":" in addr:
+            host, port = addr.rsplit(":", 1)
+            try:
+                port = int(port)
+            except ValueError:
+                port = 4000
+        else:
+            host, port = addr, 4000
+        return host, port
 
     # ---------------- 参数 ----------------
     def send_params(self):
@@ -659,6 +845,7 @@ class PlaneBattleApp(App):
                 self.deploy_screen.msg.text = self.tr.t("err_cant_place")
                 return
             self.deploy_screen.msg.text = ""
+            sound.place()
         self.deploy_screen.refresh()
 
     def do_random(self):
@@ -699,30 +886,34 @@ class PlaneBattleApp(App):
             return
         self.awaiting_result = True
         self.peer.send({"type": "shot", "x": x, "y": y})
+        sound.shot()
         self.update_turn_status()
-
-    def legend_text(self):
-        tr = self.tr
-        return (tr.t("lg_unknown") + "　" + tr.t("lg_empty") + "　" +
-                tr.t("lg_damaged") + "\n" + tr.t("lg_destroyed") + "　" +
-                tr.t("lg_wreckage") + "　" + tr.t("lg_my_plane"))
 
     def render_my_board(self, bw):
         bw.set_all(C_SEA)
         if self.board is None:
             bw.refresh()
             return
-        for p in self.board.planes:
-            for (x, y) in p.coords:
-                if p.alive:
-                    bw.set_cell(x, y, C_MY_HEAD if (x, y) == p.head_coord else C_MY_PLANE)
-                else:
-                    bw.set_cell(x, y, C_WRECKED_HEAD if (x, y) == p.head_coord else C_WRECKED_MINE)
+        self._render_planes(bw, [(p.head, p.orientation, p.alive) for p in self.board.planes])
         for (x, y), term in self.enemy_shots_on_me.items():
             if term in ("DAMAGED", "DESTROYED"):
                 bw.set_cell(x, y, C_DAMAGED if term == "DAMAGED" else C_DESTROYED)
             elif term == "EMPTY":
                 bw.set_cell(x, y, C_EMPTY)
+            elif term == "WRECKAGE":
+                bw.set_cell(x, y, C_WRECKAGE)
+        bw.refresh()
+
+    def render_revealed_enemy_board(self, bw):
+        bw.set_all(C_SEA)
+        self._render_planes(bw, self.revealed_enemy_planes)
+        for (x, y), term in self.my_shots.items():
+            if term == "EMPTY":
+                bw.set_cell(x, y, C_EMPTY)
+            elif term == "DAMAGED":
+                bw.set_cell(x, y, C_DAMAGED)
+            elif term == "DESTROYED":
+                bw.set_cell(x, y, C_DESTROYED)
             elif term == "WRECKAGE":
                 bw.set_cell(x, y, C_WRECKAGE)
         bw.refresh()
@@ -740,6 +931,16 @@ class PlaneBattleApp(App):
                 bw.set_cell(x, y, C_WRECKAGE)
         bw.refresh()
 
+    @staticmethod
+    def _render_planes(bw, planes):
+        for (head, ori, alive) in planes:
+            coords = gc.plane_absolute(head, ori)
+            for (x, y) in coords:
+                if alive:
+                    bw.set_cell(x, y, C_MY_HEAD if (x, y) == tuple(head) else C_MY_PLANE)
+                else:
+                    bw.set_cell(x, y, C_WRECKED_HEAD if (x, y) == tuple(head) else C_WRECKED_MINE)
+
     def update_turn_status(self):
         st = self.battle_screen.status
         if self.awaiting_result:
@@ -754,7 +955,7 @@ class PlaneBattleApp(App):
         if self.sm.current == "battle":
             self.battle_screen.log.text = self.log_text
 
-    # ---------------- 消息处理（与桌面版一致） ----------------
+    # ---------------- 消息处理 ----------------
     def _handle_message(self, msg):
         t = msg.get("type")
         if t == "__disconnect__":
@@ -783,6 +984,11 @@ class PlaneBattleApp(App):
             self._on_shot(msg)
         elif t == "result":
             self._on_result(msg)
+        elif t == "reveal":
+            self.revealed_enemy_planes = [(tuple(p["head"]), p["ori"], p["alive"])
+                                          for p in msg.get("planes", [])]
+            if self.sm.current == "over":
+                self.over_screen.refresh()
         elif t == "rematch":
             self.opp_want_rematch = True
             if self.want_rematch:
@@ -800,6 +1006,12 @@ class PlaneBattleApp(App):
         gameover = (term != "INVALID") and self.board.all_destroyed()
         self.peer.send({"type": "result", "x": x, "y": y, "term": term, "gameover": gameover})
         self.append_log("%s → (%d,%d)：%s" % (self.tr.t("opponent"), x, y, self.tr.t("term_" + term)))
+        if term == "DESTROYED":
+            sound.destroy()
+        elif term == "DAMAGED":
+            sound.hit()
+        elif term in ("EMPTY", "WRECKAGE"):
+            sound.miss()
         if gameover:
             self._end_game(self.my_index ^ 1)
         else:
@@ -819,6 +1031,12 @@ class PlaneBattleApp(App):
             self.my_shots[(x, y)] = term
             self.my_shot_history.add((x, y))
         self.append_log("%s → (%d,%d)：%s" % (self.tr.t("me"), x, y, self.tr.t("term_" + term)))
+        if term == "DESTROYED":
+            sound.destroy()
+        elif term == "DAMAGED":
+            sound.hit()
+        elif term in ("EMPTY", "WRECKAGE"):
+            sound.miss()
         if gameover:
             self._end_game(self.my_index)
         else:
@@ -843,9 +1061,23 @@ class PlaneBattleApp(App):
         self.game_over_winner = winner
         self.my_turn = False
         self.awaiting_result = False
+        self._send_reveal()
+        if winner == self.my_index:
+            sound.win()
+        else:
+            sound.lose()
         self.goto("over")
 
+    def _send_reveal(self):
+        if self.peer is None or self.board is None:
+            return
+        planes = [{"head": list(p.head), "ori": p.orientation, "alive": p.alive} for p in self.board.planes]
+        self.peer.send({"type": "reveal", "planes": planes})
+
     def request_rematch(self):
+        if self.peer is None or self.opp_disconnected:
+            self.hint_opp_left()
+            return
         if self.want_rematch:
             return
         self.want_rematch = True
@@ -854,6 +1086,10 @@ class PlaneBattleApp(App):
             self._start_rematch()
         else:
             self.over_screen.refresh()
+
+    def hint_opp_left(self):
+        self.opp_disconnected = True
+        self.over_screen.refresh()
 
     def _start_rematch(self):
         self._reset_round()
@@ -872,11 +1108,13 @@ class PlaneBattleApp(App):
         self.my_shot_history.clear()
         self.enemy_shots_on_me.clear()
         self.enemy_shot_history.clear()
+        self.revealed_enemy_planes = []
         self.my_turn = False
         self.awaiting_result = False
         self.game_over_winner = None
         self.want_rematch = False
         self.opp_want_rematch = False
+        self.opp_disconnected = False
         self.orientation = 0
 
     # ---------------- 清理 / 轮询 ----------------
@@ -918,7 +1156,15 @@ class PlaneBattleApp(App):
     def _on_disconnect(self):
         if self.user_closing:
             return
-        if self.phase in ("menu", "over"):
+        if self.phase == "menu":
+            return
+        if self.phase == "over":
+            self.opp_disconnected = True
+            if self.peer is not None:
+                self.peer.close()
+                self.peer = None
+            if self.sm.current == "over":
+                self.over_screen.refresh()
             return
         self._cleanup_connection()
         self.goto_menu()

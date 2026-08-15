@@ -70,6 +70,11 @@ class AIOpponent:
         if t == "rematch":
             self._reset()
             return [{"type": "rematch"}]
+        if t == "reveal":
+            # 终局复盘：AI 也回传自己的飞机位置
+            planes = [{"head": list(p.head), "ori": p.orientation, "alive": p.alive}
+                      for p in (self.board.planes if self.board else [])]
+            return [{"type": "reveal", "planes": planes}]
         return []   # bye / 其它：忽略
 
     def _on_params(self, msg):

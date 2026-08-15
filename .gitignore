@@ -9,6 +9,7 @@ venv/
 build/
 dist/
 bin/
+apk/
 
 # 运行时日志
 error.log
