@@ -23,7 +23,7 @@ requirements = python3,kivy
 
 # (str) 固定 python-for-android 到稳定版本（避免 master 分支的 Python 3.14 / pip 不兼容问题）
 p4a.fork = kivy
-p4a.branch = 2024.01.21
+p4a.branch = v2024.01.21
 
 # (str) 屏幕方向：竖屏（portrait）适配手机
 orientation = portrait
