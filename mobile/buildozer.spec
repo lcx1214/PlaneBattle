@@ -18,8 +18,8 @@ source.include_exts = py
 # (str) 应用版本
 version = 1.0.0
 
-# (list) 构建依赖（固定 Python 3.11，避免 latest 镜像默认的 Python 3.14 与 Kivy 不兼容）
-requirements = python3==3.11.9,kivy
+# (list) 构建依赖（固定 Python 3.11.9，避免 latest 镜像默认的 Python 3.14 与 Kivy 不兼容）
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy
 
 # (str) 屏幕方向：竖屏（portrait）适配手机
 orientation = portrait
