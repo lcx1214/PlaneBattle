@@ -240,6 +240,7 @@ class GameApp:
         self.room_code = ""
         self.opp_disconnected = False
         self.waiting_relay = False
+        self.versus_ai = False
 
         # 参数
         self.param_w = tk.StringVar(value="10")
@@ -247,7 +248,7 @@ class GameApp:
         self.param_n = tk.StringVar(value="3")
         self.host_port_var = tk.StringVar(value=str(net.DEFAULT_PORT))
         self.host_port = net.DEFAULT_PORT
-        self.relay_addr_var = tk.StringVar(value="127.0.0.1:4000")
+        self.relay_addr_var = tk.StringVar(value="broker.emqx.io:1883")
 
         # 对局状态
         self.w = 10
@@ -428,6 +429,7 @@ class GameApp:
     # ------------------------------------------------------------------
     def do_host(self):
         self.my_index = 0
+        self.versus_ai = False
         self.phase = "host_setup"
         self.build_host_setup_page()
 
@@ -461,11 +463,13 @@ class GameApp:
     def do_join(self):
         self.phase = "join"
         self.my_index = 1
+        self.versus_ai = False
         self.build_join_page()
 
     def do_ai(self):
         """人机对战（单人）：以本地 AI 作为对手。"""
         self.my_index = 0
+        self.versus_ai = True
         self.peer = AIOpponent()
         self.phase = "params_host"
         self.build_params_host_page()
@@ -563,13 +567,14 @@ class GameApp:
 
     def _start_relay_host(self):
         addr = self.relay_addr_var.get().strip()
-        host, port = self._parse_relay_addr(addr)
+        broker, port = self._parse_relay_addr(addr)
         self.host_status_label.configure(text=self.tr.t("connecting"), fg="#54718a")
-        threading.Thread(target=self._relay_host_loop, args=(host, port), daemon=True).start()
+        threading.Thread(target=self._mqtt_host_loop, args=(broker, port), daemon=True).start()
 
-    def _relay_host_loop(self, host, port):
+    def _mqtt_host_loop(self, broker, port):
         try:
-            peer, code = net.relay_host(host, port)
+            code = net.gen_room_code()
+            peer = net.mqtt_host(code, broker=broker, port=port)
         except OSError:
             self.root.after(0, self._relay_host_error)
             return
@@ -686,9 +691,10 @@ class GameApp:
         self.join_status_label.configure(text=self.tr.t("connecting"), fg="#54718a")
         threading.Thread(target=self._relay_join_loop, args=(host, port, code), daemon=True).start()
 
-    def _relay_join_loop(self, host, port, code):
+    def _relay_join_loop(self, broker, port, code):
         try:
-            peer = net.relay_join(host, port, code)
+            peer = net.mqtt_join(code, broker=broker, port=port)
+            peer.send({"type": "hello"})   # 通知主机：客户端已加入
         except OSError:
             self.root.after(0, self._relay_join_error)
             return
@@ -1214,7 +1220,7 @@ class GameApp:
                                           for p in msg.get("planes", [])]
             if self.phase == "over":
                 self._render_over_boards()
-        elif t == "relay_ready":
+        elif t == "hello":
             if self.waiting_relay:
                 self.waiting_relay = False
                 self.phase = "params_host"
@@ -1231,12 +1237,13 @@ class GameApp:
         self.peer.send({"type": "result", "x": x, "y": y, "term": term, "gameover": gameover})
         self._apply_my_overlay(x, y, term)
         self._log(self.tr.t("opponent"), x, y, term)
-        if term == "DESTROYED":
-            sound.destroy()
-        elif term == "DAMAGED":
-            sound.hit()
-        elif term in ("EMPTY", "WRECKAGE"):
-            sound.miss()
+        if not self.versus_ai:
+            if term == "DESTROYED":
+                sound.destroy()
+            elif term == "DAMAGED":
+                sound.hit()
+            elif term in ("EMPTY", "WRECKAGE"):
+                sound.miss()
         if gameover:
             self._end_game(winner=self.my_index ^ 1)
         else:

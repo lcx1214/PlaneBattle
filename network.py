@@ -11,9 +11,14 @@ import json
 import queue
 import socket
 import threading
+import time
 
 DEFAULT_PORT = 34567
 PROTOCOL_VERSION = 1
+
+# 公共 MQTT 中转服务器（免费、无需部署，用于“房间号”联机）
+MQTT_DEFAULT_BROKER = "broker.emqx.io"
+MQTT_DEFAULT_PORT = 1883
 
 
 class Peer:
@@ -231,3 +236,87 @@ def relay_join(relay_host, relay_port, code, timeout=20.0):
         raise
     s.settimeout(None)
     return Peer(s, name="relay:" + code)
+
+
+# ---------------------------------------------------------------------------
+# 公共 MQTT 中转（房间号联机，免自建服务器）
+# ---------------------------------------------------------------------------
+class MQTTPeer:
+    """通过公共 MQTT 中转的 Peer，实现与 Peer 相同的 send/recv/is_closed/close 接口。
+
+    role 为 "host" 或 "client"。双方通过主题 planebattle/<code>/host 与
+    planebattle/<code>/client 互相收发 JSON 消息。
+    """
+
+    def __init__(self, broker, port, code, role, timeout=15.0):
+        try:
+            import paho.mqtt.client as mqtt
+        except ImportError:
+            raise OSError("paho-mqtt not installed")
+        self.code = code
+        self.inbox = queue.Queue()
+        self.closed = False
+        self._subscribed = threading.Event()
+        try:
+            self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        except AttributeError:
+            self._client = mqtt.Client()
+        self._client.on_message = self._on_message
+        self._client.on_subscribe = lambda *a: self._subscribed.set()
+        self._client.on_connect = lambda *a: None
+        self._client.connect(broker, port, keepalive=30)
+        self._client.loop_start()
+        self.publish_topic = "planebattle/%s/%s" % (code, role)
+        sub_topic = "planebattle/%s/%s" % (code, "client" if role == "host" else "host")
+        self._client.subscribe(sub_topic, qos=1)
+        self._subscribed.wait(timeout=timeout)
+
+    def _on_message(self, client, userdata, msg):
+        try:
+            data = json.loads(msg.payload.decode("utf-8", "ignore"))
+            self.inbox.put(data)
+        except (ValueError, TypeError):
+            pass
+
+    def send(self, msg):
+        if self.closed:
+            return False
+        try:
+            self._client.publish(self.publish_topic, json.dumps(msg, ensure_ascii=False), qos=1)
+            return True
+        except Exception:
+            self.closed = True
+            return False
+
+    def recv(self):
+        try:
+            return self.inbox.get_nowait()
+        except queue.Empty:
+            return None
+
+    def is_closed(self):
+        return self.closed
+
+    def close(self):
+        self.closed = True
+        try:
+            self._client.loop_stop()
+            self._client.disconnect()
+        except Exception:
+            pass
+
+
+def mqtt_host(code, broker=MQTT_DEFAULT_BROKER, port=MQTT_DEFAULT_PORT):
+    """房间号模式：主机创建房间（本地生成房间号），返回 Peer。"""
+    return MQTTPeer(broker, port, code, "host")
+
+
+def mqtt_join(code, broker=MQTT_DEFAULT_BROKER, port=MQTT_DEFAULT_PORT):
+    """房间号模式：客户端加入房间，返回 Peer。"""
+    return MQTTPeer(broker, port, code, "client")
+
+
+def gen_room_code(length=6):
+    import random
+    import string
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=length))

@@ -18,8 +18,8 @@ source.include_exts = py,ttf,otf,wav
 # (str) 应用版本
 version = 1.0.0
 
-# (list) 构建依赖（使用 p4a 稳定版默认的 Python 3.11，与 Kivy 兼容）
-requirements = python3,kivy
+# (list) 构建依赖（使用 p4a 稳定版默认的 Python 3.11，与 Kivy 兼容；paho-mqtt 用于房间号联机）
+requirements = python3,kivy,paho-mqtt
 
 # (str) 固定 python-for-android 到稳定版本（避免 master 分支的 Python 3.14 / pip 不兼容问题）
 p4a.fork = kivy

@@ -22,11 +22,12 @@ from kivy.uix.screenmanager import Screen, ScreenManager
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
-# 注册 CJK 字体（解决中文/日文显示为 ☒ 的问题）
+# 注册 CJK 字体（解决中文/日文显示为 ☒ 的问题；使用静态字体，注册所有字重）
 from kivy.core.text import LabelBase
 _FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansSC.ttf")
 if os.path.exists(_FONT_PATH):
-    LabelBase.register(name="Roboto", fn_regular=_FONT_PATH)
+    LabelBase.register(name="Roboto", fn_regular=_FONT_PATH, fn_bold=_FONT_PATH,
+                       fn_italic=_FONT_PATH, fn_bolditalic=_FONT_PATH)
 
 import game_core as gc
 import network as net
@@ -34,7 +35,7 @@ import sound
 from ai import AIOpponent
 from i18n import Translator, LANGUAGES, LANGUAGE_NAMES
 
-RELAY_DEFAULT = "127.0.0.1:4000"
+RELAY_DEFAULT = "broker.emqx.io:1883"
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +563,8 @@ class PlaneBattleApp(App):
         self.join_mode = "direct"
         self.room_code = ""
         self.opp_disconnected = False
+        self.versus_ai = False
+        self.waiting_relay = False
 
         self.w = 10
         self.h = 10
@@ -617,16 +620,19 @@ class PlaneBattleApp(App):
 
     def goto_host(self):
         self.my_index = 0
+        self.versus_ai = False
         self.phase = "host"
         self.goto("host")
 
     def goto_join(self):
         self.my_index = 1
+        self.versus_ai = False
         self.phase = "join"
         self.goto("join")
 
     def goto_ai(self):
         self.my_index = 0
+        self.versus_ai = True
         self.peer = AIOpponent()
         self.phase = "params"
         self.goto("params")
@@ -667,13 +673,14 @@ class PlaneBattleApp(App):
 
     def _start_relay_host(self):
         addr = self.host_screen.relay_input.text.strip()
-        host, port = self._parse_relay_addr(addr)
+        broker, port = self._parse_relay_addr(addr)
         self.host_screen.status.text = self.tr.t("connecting")
-        threading.Thread(target=self._relay_host_loop, args=(host, port), daemon=True).start()
+        threading.Thread(target=self._mqtt_host_loop, args=(broker, port), daemon=True).start()
 
-    def _relay_host_loop(self, host, port):
+    def _mqtt_host_loop(self, broker, port):
         try:
-            peer, code = net.relay_host(host, port)
+            code = net.gen_room_code()
+            peer = net.mqtt_host(code, broker=broker, port=port)
         except OSError:
             Clock.schedule_once(lambda dt: self._relay_host_error(), 0)
             return
@@ -688,9 +695,8 @@ class PlaneBattleApp(App):
             return
         self.peer = peer
         self.room_code = code
+        self.waiting_relay = True
         self.host_screen.status.text = self.tr.t("your_room_code") + "  " + code + "\n" + self.tr.t("waiting_relay_client")
-        self.phase = "params"
-        Clock.schedule_once(lambda dt: self.goto("params"), 1.2)
 
     def _accept_loop(self):
         try:
@@ -750,9 +756,10 @@ class PlaneBattleApp(App):
         self.join_screen.status.text = self.tr.t("connecting")
         threading.Thread(target=self._relay_join_loop, args=(host, port, code), daemon=True).start()
 
-    def _relay_join_loop(self, host, port, code):
+    def _relay_join_loop(self, broker, port, code):
         try:
-            peer = net.relay_join(host, port, code)
+            peer = net.mqtt_join(code, broker=broker, port=port)
+            peer.send({"type": "hello"})   # 通知主机：客户端已加入
         except OSError:
             Clock.schedule_once(lambda dt: self._relay_join_error(), 0)
             return
@@ -989,6 +996,11 @@ class PlaneBattleApp(App):
                                           for p in msg.get("planes", [])]
             if self.sm.current == "over":
                 self.over_screen.refresh()
+        elif t == "hello":
+            if self.waiting_relay:
+                self.waiting_relay = False
+                self.phase = "params"
+                self.goto("params")
         elif t == "rematch":
             self.opp_want_rematch = True
             if self.want_rematch:
@@ -1006,12 +1018,13 @@ class PlaneBattleApp(App):
         gameover = (term != "INVALID") and self.board.all_destroyed()
         self.peer.send({"type": "result", "x": x, "y": y, "term": term, "gameover": gameover})
         self.append_log("%s → (%d,%d)：%s" % (self.tr.t("opponent"), x, y, self.tr.t("term_" + term)))
-        if term == "DESTROYED":
-            sound.destroy()
-        elif term == "DAMAGED":
-            sound.hit()
-        elif term in ("EMPTY", "WRECKAGE"):
-            sound.miss()
+        if not self.versus_ai:
+            if term == "DESTROYED":
+                sound.destroy()
+            elif term == "DAMAGED":
+                sound.hit()
+            elif term in ("EMPTY", "WRECKAGE"):
+                sound.miss()
         if gameover:
             self._end_game(self.my_index ^ 1)
         else:
