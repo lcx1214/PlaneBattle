@@ -18,8 +18,12 @@ source.include_exts = py
 # (str) 应用版本
 version = 1.0.0
 
-# (list) 构建依赖（固定 Python 3.11.9，避免 latest 镜像默认的 Python 3.14 与 Kivy 不兼容）
-requirements = python3==3.11.9,hostpython3==3.11.9,kivy
+# (list) 构建依赖（使用 p4a 稳定版默认的 Python 3.11，与 Kivy 兼容）
+requirements = python3,kivy
+
+# (str) 固定 python-for-android 到稳定版本（避免 master 分支的 Python 3.14 / pip 不兼容问题）
+p4a.fork = kivy
+p4a.branch = 2024.01.21
 
 # (str) 屏幕方向：竖屏（portrait）适配手机
 orientation = portrait
