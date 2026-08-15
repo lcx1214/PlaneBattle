@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# 构建产物（exe / APK 中间文件）
+build/
+dist/
+*.spec
+bin/
+
+# 运行时日志
+error.log
+*.log
+
+# Kivy / 其它缓存
+.kivy/
+.python-version
