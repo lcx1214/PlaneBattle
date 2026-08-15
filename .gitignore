@@ -8,7 +8,6 @@ venv/
 # 构建产物（exe / APK 中间文件）
 build/
 dist/
-*.spec
 bin/
 
 # 运行时日志
